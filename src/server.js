@@ -25,7 +25,7 @@ for (const suffix of ["PUBLIC_PORT", "STATE_DIR", "WORKSPACE_DIR", "GATEWAY_TOKE
 // boot but the Railway domain will be routed to a different port.
 //
 // OPENCLAW_PUBLIC_PORT is kept as an escape hatch for non-Railway deployments.
-const PORT = Number.parseInt(process.env.PORT ?? process.env.OPENCLAW_PUBLIC_PORT ?? "3000", 10);
+const PORT = Number.parseInt(process.env.PORT ?? process.env.OPENCLAW_PUBLIC_PORT ?? "8080", 10);
 
 // State/workspace
 // OpenClaw defaults to ~/.openclaw.
@@ -702,11 +702,6 @@ function runCmd(cmd, args, opts = {}) {
 
 app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
   try {
-    const safeWrite = (msg) => {
-      try {
-        if (!res.writableEnded) res.write(String(msg) + "\n");
-      } catch {}
-    };
     if (isConfigured()) {
       await ensureGatewayRunning();
       return res.json({ ok: true, output: "Already configured.\nUse Reset setup if you want to rerun onboarding.\n" });
@@ -724,157 +719,156 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
       return res.status(400).json({ ok: false, output: `Setup input error: ${String(err)}` });
     }
 
-    safeWrite("[setup] running openclaw onboard...");
     const onboard = await runCmd(OPENCLAW_NODE, clawArgs(onboardArgs));
 
-  let extra = "";
+    let extra = "[setup] running openclaw onboard...\n";
 
-  const ok = onboard.code === 0 && isConfigured();
+    const ok = onboard.code === 0 && isConfigured();
 
-  // Optional setup (only after successful onboarding).
-  if (ok) {
-    // Ensure gateway token is written into config so the browser UI can authenticate reliably.
-    // (We also enforce loopback bind since the wrapper proxies externally.)
-    // IMPORTANT: Set both gateway.auth.token (server-side) and gateway.remote.token (client-side)
-    // to the same value so the Control UI can connect without "token mismatch" errors.
-    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.auth.mode", "token"]));
-    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.auth.token", OPENCLAW_GATEWAY_TOKEN]));
-    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.remote.token", OPENCLAW_GATEWAY_TOKEN]));
-    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.bind", "loopback"]));
-    await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.port", String(INTERNAL_GATEWAY_PORT)]));
+    // Optional setup (only after successful onboarding).
+    if (ok) {
+      // Ensure gateway token is written into config so the browser UI can authenticate reliably.
+      // (We also enforce loopback bind since the wrapper proxies externally.)
+      // IMPORTANT: Set both gateway.auth.token (server-side) and gateway.remote.token (client-side)
+      // to the same value so the Control UI can connect without "token mismatch" errors.
+      await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.auth.mode", "token"]));
+      await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.auth.token", OPENCLAW_GATEWAY_TOKEN]));
+      await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.remote.token", OPENCLAW_GATEWAY_TOKEN]));
+      await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.bind", "loopback"]));
+      await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "gateway.port", String(INTERNAL_GATEWAY_PORT)]));
 
-    // Railway runs behind a reverse proxy. Trust loopback as a proxy hop so local client detection
-    // remains correct when X-Forwarded-* headers are present.
-    await runCmd(
-      OPENCLAW_NODE,
-      clawArgs(["config", "set", "--json", "gateway.trustedProxies", JSON.stringify(["127.0.0.1"]) ]),
-    );
+      // Railway runs behind a reverse proxy. Trust loopback as a proxy hop so local client detection
+      // remains correct when X-Forwarded-* headers are present.
+      await runCmd(
+        OPENCLAW_NODE,
+        clawArgs(["config", "set", "--json", "gateway.trustedProxies", JSON.stringify(["127.0.0.1"]) ]),
+      );
 
-    // Optional: configure a custom OpenAI-compatible provider (base URL) for advanced users.
-    if (payload.customProviderId?.trim() && payload.customProviderBaseUrl?.trim()) {
-      const providerId = payload.customProviderId.trim();
-      const baseUrl = payload.customProviderBaseUrl.trim();
-      const api = (payload.customProviderApi || "openai-completions").trim();
-      const apiKeyEnv = (payload.customProviderApiKeyEnv || "").trim();
-      const modelId = (payload.customProviderModelId || "").trim();
+      // Optional: configure a custom OpenAI-compatible provider (base URL) for advanced users.
+      if (payload.customProviderId?.trim() && payload.customProviderBaseUrl?.trim()) {
+        const providerId = payload.customProviderId.trim();
+        const baseUrl = payload.customProviderBaseUrl.trim();
+        const api = (payload.customProviderApi || "openai-completions").trim();
+        const apiKeyEnv = (payload.customProviderApiKeyEnv || "").trim();
+        const modelId = (payload.customProviderModelId || "").trim();
 
-      if (!/^[A-Za-z0-9_-]+$/.test(providerId)) {
-        extra += `\n[custom provider] skipped: invalid provider id (use letters/numbers/_/-)`;
-      } else if (!/^https?:\/\//.test(baseUrl)) {
-        extra += `\n[custom provider] skipped: baseUrl must start with http(s)://`;
-      } else if (api !== "openai-completions" && api !== "openai-responses") {
-        extra += `\n[custom provider] skipped: api must be openai-completions or openai-responses`;
-      } else if (apiKeyEnv && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) {
-        extra += `\n[custom provider] skipped: invalid api key env var name`;
-      } else {
-        const providerCfg = {
-          baseUrl,
-          api,
-          apiKey: apiKeyEnv ? "${" + apiKeyEnv + "}" : undefined,
-          models: modelId ? [{ id: modelId, name: modelId }] : undefined,
-        };
+        if (!/^[A-Za-z0-9_-]+$/.test(providerId)) {
+          extra += `\n[custom provider] skipped: invalid provider id (use letters/numbers/_/-)`;
+        } else if (!/^https?:\/\//.test(baseUrl)) {
+          extra += `\n[custom provider] skipped: baseUrl must start with http(s)://`;
+        } else if (api !== "openai-completions" && api !== "openai-responses") {
+          extra += `\n[custom provider] skipped: api must be openai-completions or openai-responses`;
+        } else if (apiKeyEnv && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) {
+          extra += `\n[custom provider] skipped: invalid api key env var name`;
+        } else {
+          const providerCfg = {
+            baseUrl,
+            api,
+            apiKey: apiKeyEnv ? "${" + apiKeyEnv + "}" : undefined,
+            models: modelId ? [{ id: modelId, name: modelId }] : undefined,
+          };
 
-        // Ensure we merge in this provider rather than replacing other providers.
-        await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "models.mode", "merge"]));
-        const set = await runCmd(
-          OPENCLAW_NODE,
-          clawArgs(["config", "set", "--json", `models.providers.${providerId}`, JSON.stringify(providerCfg)]),
-        );
-        extra += `\n[custom provider] exit=${set.code} (output ${set.output.length} chars)\n${set.output || "(no output)"}`;
+          // Ensure we merge in this provider rather than replacing other providers.
+          await runCmd(OPENCLAW_NODE, clawArgs(["config", "set", "models.mode", "merge"]));
+          const set = await runCmd(
+            OPENCLAW_NODE,
+            clawArgs(["config", "set", "--json", `models.providers.${providerId}`, JSON.stringify(providerCfg)]),
+          );
+          extra += `\n[custom provider] exit=${set.code} (output ${set.output.length} chars)\n${set.output || "(no output)"}`;
+        }
       }
+
+      const channelsHelp = await runCmd(OPENCLAW_NODE, clawArgs(["channels", "add", "--help"]));
+      const helpText = channelsHelp.output || "";
+
+      const supports = (name) => helpText.includes(name);
+
+      if (payload.telegramToken?.trim()) {
+        if (!supports("telegram")) {
+          extra += "\n[telegram] skipped (this openclaw build does not list telegram in `channels add --help`)\n";
+        } else {
+          // Avoid `channels add` here (it has proven flaky across builds); write config directly.
+          const token = payload.telegramToken.trim();
+          const cfgObj = {
+            enabled: true,
+            dmPolicy: "pairing",
+            botToken: token,
+            groupPolicy: "allowlist",
+            streamMode: "partial",
+          };
+          const set = await runCmd(
+            OPENCLAW_NODE,
+            clawArgs(["config", "set", "--json", "channels.telegram", JSON.stringify(cfgObj)]),
+          );
+          const get = await runCmd(OPENCLAW_NODE, clawArgs(["config", "get", "channels.telegram"]));
+
+          // Best-effort: enable the telegram plugin explicitly (some builds require this even when configured).
+          const plug = await runCmd(OPENCLAW_NODE, clawArgs(["plugins", "enable", "telegram"]));
+
+          extra += `\n[telegram config] exit=${set.code} (output ${set.output.length} chars)\n${set.output || "(no output)"}`;
+          extra += `\n[telegram verify] exit=${get.code} (output ${get.output.length} chars)\n${get.output || "(no output)"}`;
+          extra += `\n[telegram plugin enable] exit=${plug.code} (output ${plug.output.length} chars)\n${plug.output || "(no output)"}`;
+        }
+      }
+
+      if (payload.discordToken?.trim()) {
+        if (!supports("discord")) {
+          extra += "\n[discord] skipped (this openclaw build does not list discord in `channels add --help`)\n";
+        } else {
+          const token = payload.discordToken.trim();
+          const cfgObj = {
+            enabled: true,
+            token,
+            groupPolicy: "allowlist",
+            dm: {
+              policy: "pairing",
+            },
+          };
+          const set = await runCmd(
+            OPENCLAW_NODE,
+            clawArgs(["config", "set", "--json", "channels.discord", JSON.stringify(cfgObj)]),
+          );
+          const get = await runCmd(OPENCLAW_NODE, clawArgs(["config", "get", "channels.discord"]));
+          extra += `\n[discord config] exit=${set.code} (output ${set.output.length} chars)\n${set.output || "(no output)"}`;
+          extra += `\n[discord verify] exit=${get.code} (output ${get.output.length} chars)\n${get.output || "(no output)"}`;
+        }
+      }
+
+      if (payload.slackBotToken?.trim() || payload.slackAppToken?.trim()) {
+        if (!supports("slack")) {
+          extra += "\n[slack] skipped (this openclaw build does not list slack in `channels add --help`)\n";
+        } else {
+          const cfgObj = {
+            enabled: true,
+            botToken: payload.slackBotToken?.trim() || undefined,
+            appToken: payload.slackAppToken?.trim() || undefined,
+          };
+          const set = await runCmd(
+            OPENCLAW_NODE,
+            clawArgs(["config", "set", "--json", "channels.slack", JSON.stringify(cfgObj)]),
+          );
+          const get = await runCmd(OPENCLAW_NODE, clawArgs(["config", "get", "channels.slack"]));
+          extra += `\n[slack config] exit=${set.code} (output ${set.output.length} chars)\n${set.output || "(no output)"}`;
+          extra += `\n[slack verify] exit=${get.code} (output ${get.output.length} chars)\n${get.output || "(no output)"}`;
+        }
+      }
+
+      // Apply changes immediately.
+      await restartGateway();
+
+      // Ensure OpenClaw applies any "configured but not enabled" channel/plugin changes.
+      // This makes Telegram/Discord pairing issues much less "silent".
+      const fix = await runCmd(OPENCLAW_NODE, clawArgs(["doctor", "--fix"]));
+      extra += `\n[doctor --fix] exit=${fix.code} (output ${fix.output.length} chars)\n${fix.output || "(no output)"}`;
+
+      // Doctor may require a restart depending on changes.
+      await restartGateway();
     }
 
-    const channelsHelp = await runCmd(OPENCLAW_NODE, clawArgs(["channels", "add", "--help"]));
-    const helpText = channelsHelp.output || "";
-
-    const supports = (name) => helpText.includes(name);
-
-    if (payload.telegramToken?.trim()) {
-      if (!supports("telegram")) {
-        extra += "\n[telegram] skipped (this openclaw build does not list telegram in `channels add --help`)\n";
-      } else {
-        // Avoid `channels add` here (it has proven flaky across builds); write config directly.
-        const token = payload.telegramToken.trim();
-        const cfgObj = {
-          enabled: true,
-          dmPolicy: "pairing",
-          botToken: token,
-          groupPolicy: "allowlist",
-          streamMode: "partial",
-        };
-        const set = await runCmd(
-          OPENCLAW_NODE,
-          clawArgs(["config", "set", "--json", "channels.telegram", JSON.stringify(cfgObj)]),
-        );
-        const get = await runCmd(OPENCLAW_NODE, clawArgs(["config", "get", "channels.telegram"]));
-
-        // Best-effort: enable the telegram plugin explicitly (some builds require this even when configured).
-        const plug = await runCmd(OPENCLAW_NODE, clawArgs(["plugins", "enable", "telegram"]));
-
-        extra += `\n[telegram config] exit=${set.code} (output ${set.output.length} chars)\n${set.output || "(no output)"}`;
-        extra += `\n[telegram verify] exit=${get.code} (output ${get.output.length} chars)\n${get.output || "(no output)"}`;
-        extra += `\n[telegram plugin enable] exit=${plug.code} (output ${plug.output.length} chars)\n${plug.output || "(no output)"}`;
-      }
-    }
-
-    if (payload.discordToken?.trim()) {
-      if (!supports("discord")) {
-        extra += "\n[discord] skipped (this openclaw build does not list discord in `channels add --help`)\n";
-      } else {
-        const token = payload.discordToken.trim();
-        const cfgObj = {
-          enabled: true,
-          token,
-          groupPolicy: "allowlist",
-          dm: {
-            policy: "pairing",
-          },
-        };
-        const set = await runCmd(
-          OPENCLAW_NODE,
-          clawArgs(["config", "set", "--json", "channels.discord", JSON.stringify(cfgObj)]),
-        );
-        const get = await runCmd(OPENCLAW_NODE, clawArgs(["config", "get", "channels.discord"]));
-        extra += `\n[discord config] exit=${set.code} (output ${set.output.length} chars)\n${set.output || "(no output)"}`;
-        extra += `\n[discord verify] exit=${get.code} (output ${get.output.length} chars)\n${get.output || "(no output)"}`;
-      }
-    }
-
-    if (payload.slackBotToken?.trim() || payload.slackAppToken?.trim()) {
-      if (!supports("slack")) {
-        extra += "\n[slack] skipped (this openclaw build does not list slack in `channels add --help`)\n";
-      } else {
-        const cfgObj = {
-          enabled: true,
-          botToken: payload.slackBotToken?.trim() || undefined,
-          appToken: payload.slackAppToken?.trim() || undefined,
-        };
-        const set = await runCmd(
-          OPENCLAW_NODE,
-          clawArgs(["config", "set", "--json", "channels.slack", JSON.stringify(cfgObj)]),
-        );
-        const get = await runCmd(OPENCLAW_NODE, clawArgs(["config", "get", "channels.slack"]));
-        extra += `\n[slack config] exit=${set.code} (output ${set.output.length} chars)\n${set.output || "(no output)"}`;
-        extra += `\n[slack verify] exit=${get.code} (output ${get.output.length} chars)\n${get.output || "(no output)"}`;
-      }
-    }
-
-    // Apply changes immediately.
-    await restartGateway();
-
-    // Ensure OpenClaw applies any "configured but not enabled" channel/plugin changes.
-    // This makes Telegram/Discord pairing issues much less "silent".
-    const fix = await runCmd(OPENCLAW_NODE, clawArgs(["doctor", "--fix"]));
-    extra += `\n[doctor --fix] exit=${fix.code} (output ${fix.output.length} chars)\n${fix.output || "(no output)"}`;
-
-    // Doctor may require a restart depending on changes.
-    await restartGateway();
-  }
-
-  return res.status(ok ? 200 : 500).json({
-    ok,
-    output: `${onboard.output}${extra}`,
-  });
+    return res.status(ok ? 200 : 500).json({
+      ok,
+      output: `${onboard.output}${extra}`,
+    });
   } catch (err) {
     console.error("[/setup/api/run] error:", err);
     return res.status(500).json({ ok: false, output: `Internal error: ${String(err)}` });
